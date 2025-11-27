@@ -7,11 +7,12 @@ import BotConfig from "@/models/BotConfig";
 import BotSettings from "@/models/BotSettings";
 import { generateWithYuki } from "@/lib/gemini";
 
-// Raw body reader for Telegram
+// Telegram raw body support
 export const config = {
   api: { bodyParser: false },
 };
 
+// Raw body reader
 function parseRawBody(req) {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -21,7 +22,7 @@ function parseRawBody(req) {
   });
 }
 
-// Telegram send message with reply support
+// Telegram send message (with reply support)
 async function sendMessage(token, chatId, text, extra = {}) {
   await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
@@ -55,10 +56,7 @@ export default async function handler(req, res) {
   const userId = msg.from.id.toString();
   const chatType = msg.chat.type;
   const userText = msg.text || msg.caption || "";
-  const isGroup =
-    chatType === "group" ||
-    chatType === "supergroup" ||
-    chatType.includes("group");
+  const isGroup = chatType.includes("group");
 
   // Load bot token
   const botCfg = await BotConfig.findOne().lean();
@@ -79,9 +77,9 @@ export default async function handler(req, res) {
 
   const lower = userText.toLowerCase().trim();
 
-  // ------------------------
+  // ---------------------------
   // GROUP LOGGER
-  // ------------------------
+  // ---------------------------
   if (isGroup) {
     await Group.findOneAndUpdate(
       { chatId: String(chatId) },
@@ -97,9 +95,9 @@ export default async function handler(req, res) {
     );
   }
 
-  // ------------------------
+  // ---------------------------
   // /start command
-  // ------------------------
+  // ---------------------------
   if (lower.startsWith("/start")) {
     let intro = `Hey, main *${botName}* hu ✨`;
 
@@ -114,46 +112,40 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true });
   }
 
-  // ------------------------
-  // SMART GROUP REPLY LOGIC
-  // ------------------------
+  // =====================================================
+  // 🔥 STRICT GROUP MODE — ONLY MENTION OR REPLY-TO
+  // =====================================================
   let shouldReply = false;
 
-  // 1) PRIVATE → always reply
+  // 1) PRIVATE CHAT → always reply
   if (!isGroup) shouldReply = true;
 
-  // Load existing memory
-  let memory = await Memory.findOne({ chatId, userId });
-
-  // 2) If user replies to bot
+  // 2) User replied directly to bot's message
   if (
     msg.reply_to_message?.from?.username?.toLowerCase() === botUsername
   ) {
     shouldReply = true;
   }
 
-  // 3) Natural conversation: last message from bot
-  if (memory && memory.history.length > 0) {
-    const last = memory.history[memory.history.length - 1];
-    if (last.role === "assistant") shouldReply = true;
-  }
-
-  // 4) Mention / name
-  if (
-    lower.includes(botName.toLowerCase()) ||
-    lower.includes("@" + botUsername)
-  ) {
+  // 3) Mention @botUsername
+  if (lower.includes("@" + botUsername)) {
     shouldReply = true;
   }
 
-  // 5) Anti-spam
+  // 4) Mention botName ("Yuki", etc.)
+  if (lower.includes(botName.toLowerCase())) {
+    shouldReply = true;
+  }
+
+  // 5) OTHERWISE ignore everything (dot, emoji, normal msg)
   if (isGroup && !shouldReply) {
     return res.status(200).json({ ok: true });
   }
 
-  // ------------------------
+  // ---------------------------
   // MEMORY SYSTEM
-  // ------------------------
+  // ---------------------------
+  let memory = await Memory.findOne({ chatId, userId });
   if (!memory) {
     memory = await Memory.create({
       chatId,
@@ -179,21 +171,21 @@ export default async function handler(req, res) {
     .map((m) => `${m.role === "user" ? "User" : "Her"}: ${m.text}`)
     .join("\n");
 
-  // ------------------------
-  // BUILD PROMPT
-  // ------------------------
+  // ---------------------------
+  // PROMPT SYSTEM
+  // ---------------------------
   const genderLine =
     gender === "male"
-      ? "Tum 18 saal ke Delhi ke ladke ho, chill + friendly tone me."
+      ? "Tum 18 saal ke Delhi ke ladke ho, friendly + chill tone me."
       : "Tum 18 saal ki Delhi ki cute girl ho, soft + friendly tone me.";
 
   const toneMap = {
     flirty:
-      "Tum flirty, playful, teasing tone me 1–3 lines me natural reply doge.",
+      "Tum flirty, teasing, sweet tone me natural reply doge. 1–3 lines me.",
     professional:
-      "Tum calm, polite, professional Hinglish tone me reply doge.",
+      "Tum calm, polite, respectful tone me reply doge. No flirting.",
     normal:
-      "Tum soft Hinglish me friendly natural tone me reply doge.",
+      "Tum soft Hinglish me friendly, sweet, natural tone me reply doge. 1–3 lines.",
   };
 
   const ownerRule = `
@@ -226,7 +218,7 @@ Her:
 
   await new Promise((r) => setTimeout(r, 900));
 
-  // Generate response
+  // Generate reply
   let reply;
   try {
     reply = await generateWithYuki(finalPrompt);
@@ -234,7 +226,7 @@ Her:
     reply = "Oops, thoda issue aa gaya 😅";
   }
 
-  // Save bot response
+  // Save assistant message
   memory.history.push({
     role: "assistant",
     text: reply,
@@ -245,7 +237,7 @@ Her:
 
   await memory.save();
 
-  // SEND FINAL MESSAGE (THREAD FIX)
+  // FINAL SEND (replying to user message)
   await sendMessage(BOT_TOKEN, chatId, reply, {
     reply_to_message_id: msg.message_id,
   });
