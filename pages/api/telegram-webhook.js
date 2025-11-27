@@ -7,12 +7,12 @@ import BotConfig from "@/models/BotConfig";
 import BotSettings from "@/models/BotSettings";
 import { generateWithYuki } from "@/lib/gemini";
 
-// Telegram raw body support
+// Telegram raw body
 export const config = {
   api: { bodyParser: false },
 };
 
-// Raw body reader
+// Read raw body
 function parseRawBody(req) {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -22,7 +22,7 @@ function parseRawBody(req) {
   });
 }
 
-// Telegram send message (with reply support)
+// Telegram send message
 async function sendMessage(token, chatId, text, extra = {}) {
   await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
@@ -54,20 +54,20 @@ export default async function handler(req, res) {
 
   const chatId = msg.chat.id;
   const userId = msg.from.id.toString();
-  const chatType = msg.chat.type;
   const userText = msg.text || msg.caption || "";
+  const chatType = msg.chat.type;
   const isGroup = chatType.includes("group");
 
-  // Load bot token
+  const lower = userText.toLowerCase();
+
+  // CONFIG
   const botCfg = await BotConfig.findOne().lean();
   if (!botCfg?.telegramBotToken) return res.status(200).json({ ok: true });
   const BOT_TOKEN = botCfg.telegramBotToken;
 
-  // Load panel settings
   const settings = (await BotSettings.findOne().lean()) || {};
-
-  const ownerName = settings.ownerName || "Owner";
   const botName = settings.botName || "Yuki";
+  const ownerName = settings.ownerName || "Owner";
   const botUsername = (settings.botUsername || "yuki_ai_bot")
     .replace("@", "")
     .toLowerCase();
@@ -75,16 +75,18 @@ export default async function handler(req, res) {
   const personality = settings.personality || "normal";
   const groupLink = settings.groupLink || "";
 
-  const lower = userText.toLowerCase().trim();
+  // CLEAN NAME MATCHING (Unicode/punctuation remove)
+  const cleanText = lower.replace(/[^\p{L}\p{N}\s]/gu, "").trim();
+  const cleanBotName = botName.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "").trim();
 
-  // ---------------------------
+  // --------------------------
   // GROUP LOGGER
-  // ---------------------------
+  // --------------------------
   if (isGroup) {
     await Group.findOneAndUpdate(
-      { chatId: String(chatId) },
+      { chatId },
       {
-        chatId: String(chatId),
+        chatId,
         title: msg.chat.title || "",
         username: msg.chat.username || "",
         type: chatType,
@@ -95,12 +97,11 @@ export default async function handler(req, res) {
     );
   }
 
-  // ---------------------------
-  // /start command
-  // ---------------------------
+  // --------------------------
+  // /start COMMAND
+  // --------------------------
   if (lower.startsWith("/start")) {
     let intro = `Hey, main *${botName}* hu ✨`;
-
     if (groupLink) intro += `\nGroup: ${groupLink}`;
     intro += `\nOwner: *${ownerName}*`;
     intro += `\nBot: *@${botUsername}*`;
@@ -113,38 +114,40 @@ export default async function handler(req, res) {
   }
 
   // =====================================================
-  // 🔥 STRICT GROUP MODE — ONLY MENTION OR REPLY-TO
+  // STRICT GROUP MODE — ONLY reply in 3 cases:
+  // 1) reply-to-bot
+  // 2) @username
+  // 3) botName mention (unicode safe)
   // =====================================================
   let shouldReply = false;
 
-  // 1) PRIVATE CHAT → always reply
+  // 1) PRIVATE → always reply
   if (!isGroup) shouldReply = true;
 
-  // 2) User replied directly to bot's message
+  // 2) User replied directly to bot
   if (
     msg.reply_to_message?.from?.username?.toLowerCase() === botUsername
+  ) shouldReply = true;
+
+  // 3) @mention
+  if (lower.includes("@" + botUsername)) shouldReply = true;
+
+  // 4) Loose name match
+  if (
+    cleanText.includes(cleanBotName) ||
+    lower.includes(botName.toLowerCase())
   ) {
     shouldReply = true;
   }
 
-  // 3) Mention @botUsername
-  if (lower.includes("@" + botUsername)) {
-    shouldReply = true;
-  }
-
-  // 4) Mention botName ("Yuki", etc.)
-  if (lower.includes(botName.toLowerCase())) {
-    shouldReply = true;
-  }
-
-  // 5) OTHERWISE ignore everything (dot, emoji, normal msg)
+  // 5) Otherwise ignore group messages
   if (isGroup && !shouldReply) {
     return res.status(200).json({ ok: true });
   }
 
-  // ---------------------------
+  // --------------------------
   // MEMORY SYSTEM
-  // ---------------------------
+  // --------------------------
   let memory = await Memory.findOne({ chatId, userId });
   if (!memory) {
     memory = await Memory.create({
@@ -171,9 +174,9 @@ export default async function handler(req, res) {
     .map((m) => `${m.role === "user" ? "User" : "Her"}: ${m.text}`)
     .join("\n");
 
-  // ---------------------------
+  // --------------------------
   // PROMPT SYSTEM
-  // ---------------------------
+  // --------------------------
   const genderLine =
     gender === "male"
       ? "Tum 18 saal ke Delhi ke ladke ho, friendly + chill tone me."
@@ -189,7 +192,7 @@ export default async function handler(req, res) {
   };
 
   const ownerRule = `
-Tumhara real owner sirf *${ownerName}* hai.
+Tumhara REAL owner sirf *${ownerName}* hai.
 Owner ka naam sirf tab lena jab koi specifically pooche.
 `;
 
@@ -226,7 +229,7 @@ Her:
     reply = "Oops, thoda issue aa gaya 😅";
   }
 
-  // Save assistant message
+  // Save bot message
   memory.history.push({
     role: "assistant",
     text: reply,
@@ -237,7 +240,7 @@ Her:
 
   await memory.save();
 
-  // FINAL SEND (replying to user message)
+  // SEND FINAL MESSAGE
   await sendMessage(BOT_TOKEN, chatId, reply, {
     reply_to_message_id: msg.message_id,
   });
